@@ -175,8 +175,11 @@ SYSTEM_PROMPT = (
     "tipo 'Introducción', sin markdown, sin listas con viñetas, sin meta-comentarios tipo 'aquí tienes' "
     "o 'espero que te guste', sin citas tipo '[1]' ni URLs pegadas en el medio del texto. "
     "Solo párrafos naturales separados por líneas en blanco, con tono conversacional y fluido. "
-    "Cuando el usuario pida una duración específica en minutos u horas, calculá el largo a ~155 "
-    "palabras por minuto narradas y cumplilo — es mejor pasarse un poco que quedar corto."
+    "REGLA DE LARGO OBLIGATORIA: cuando el usuario pida una duración en minutos u horas, "
+    "el texto se convierte a audio a 155 palabras por minuto. Debés alcanzar ese largo EXACTO. "
+    "No termines antes. Si llegás al final del tema, desarrollá ejemplos, anécdotas, contexto histórico, "
+    "comparaciones o reflexiones hasta completar el largo pedido. "
+    "Es IMPERATIVO llegar al objetivo de palabras — quedarse corto es un error grave."
 )
 
 # ─── Job processor ────────────────────────────────────────────────
@@ -188,9 +191,10 @@ def _generate_text(job):
     user_content = job["prompt"]
     if word_target:
         user_content += (
-            f"\n\n[Instrucción de largo — CRÍTICA: apuntá a aproximadamente {word_target} palabras "
-            f"para que dure lo pedido a ~155 palabras por minuto narradas. "
-            f"Mejor pasarte un poco que quedar corto. No pares antes.]"
+            f"\n\n[LARGO OBLIGATORIO: este texto se convierte a audio a 155 palabras/minuto. "
+            f"Debés escribir EXACTAMENTE {word_target} palabras (podés pasarte hasta un 10%, nunca quedarte corto). "
+            f"Llevá la cuenta mientras escribís. NO termines hasta llegar a {word_target} palabras. "
+            f"Si el tema se agota antes, profundizá con ejemplos, anécdotas, contexto, datos concretos y reflexiones.]"
         )
 
     kwargs = dict(
@@ -344,6 +348,23 @@ def jobs_audio(jid):
     safe = re.sub(r'\s+', '_', re.sub(r'[^\w\s-]', '', job.get("title") or "narrador")).lower()[:60] or "narrador"
     return Response(audio, mimetype="audio/mpeg",
                     headers={"Content-Disposition": f'inline; filename="{safe}.mp3"'})
+
+@app.route("/synth", methods=["POST"])
+def synth():
+    if (err := _check_auth()): return err
+    body = request.get_json() or {}
+    text  = (body.get("text") or "").strip()
+    voice = body.get("voice") or "Achird"
+    speed = float(body.get("speed") or 1.0)
+    if not text: return jsonify({"error": "text requerido"}), 400
+
+    chunks = _split_text(_clean_markdown(text))
+    args = [(c, voice, speed) for c in chunks]
+    with ThreadPoolExecutor(max_workers=min(8, len(chunks))) as pool:
+        parts = list(pool.map(_synth_chunk, args))
+
+    audio = b"".join(parts)
+    return Response(audio, mimetype="audio/mpeg")
 
 @app.route("/jobs/<jid>", methods=["DELETE"])
 def jobs_delete(jid):
