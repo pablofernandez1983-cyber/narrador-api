@@ -1,0 +1,8 @@
+Flask>=3.0
+flask-cors>=4.0
+psycopg2-binary>=2.9
+boto3>=1.34
+botocore>=1.34
+requests>=2.31
+anthropic>=0.50
+gunicorn>=21.2
