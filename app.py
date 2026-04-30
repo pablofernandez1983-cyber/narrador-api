@@ -274,17 +274,20 @@ def _process_job(jid):
         if not job:
             return
 
-        status_init = "writing"
-        text_init = "🔎 Investigando en la web..." if job["web_search"] else "Pidiendo a Claude..."
-        _job_update(jid, status=status_init, progress_pct=5, progress_text=text_init)
-
-        text, searches = _generate_text(job)
-
-        title = text.split("\n")[0][:120].strip() or job["prompt"][:80]
-        _job_update(jid, text_chars=len(text), title=title, search_count=searches)
+        if job["model"] == "direct":
+            text = job["prompt"]
+            title = text.split("\n")[0][:120].strip() or "Audio"
+            _job_update(jid, status="recording", progress_pct=10,
+                        progress_text="Grabando audio...", title=title)
+        else:
+            status_init = "writing"
+            text_init = "🔎 Investigando en la web..." if job["web_search"] else "Pidiendo a Claude..."
+            _job_update(jid, status=status_init, progress_pct=5, progress_text=text_init)
+            text, searches = _generate_text(job)
+            title = text.split("\n")[0][:120].strip() or job["prompt"][:80]
+            _job_update(jid, text_chars=len(text), title=title, search_count=searches)
 
         audio_key, audio_size = _generate_audio(job, text)
-
         _job_update(jid, status="done", progress_pct=100,
                     progress_text="Listo", audio_key=audio_key, audio_size=audio_size)
 
@@ -305,18 +308,30 @@ def health():
 def jobs_create():
     if (err := _check_auth()):
         return err
-    body = request.get_json() or {}
+    body   = request.get_json() or {}
     prompt = (body.get("prompt") or "").strip()
-    if not prompt:
-        return jsonify({"error": "prompt requerido"}), 400
+    text   = (body.get("text")   or "").strip()
 
-    data = {
-        "prompt": prompt,
-        "model":      body.get("model") or "claude-haiku-4-5",
-        "voice":      body.get("voice") or "Achird",
-        "speed":      float(body.get("speed") or 1.0),
-        "web_search": bool(body.get("web_search")),
-    }
+    if not prompt and not text:
+        return jsonify({"error": "prompt o text requerido"}), 400
+
+    if text:
+        data = {
+            "prompt":     text,
+            "model":      "direct",
+            "voice":      body.get("voice") or "Achird",
+            "speed":      float(body.get("speed") or 1.0),
+            "web_search": False,
+        }
+    else:
+        data = {
+            "prompt":     prompt,
+            "model":      body.get("model") or "claude-haiku-4-5",
+            "voice":      body.get("voice") or "Achird",
+            "speed":      float(body.get("speed") or 1.0),
+            "web_search": bool(body.get("web_search")),
+        }
+
     jid = _job_create(data)
     threading.Thread(target=_process_job, args=(jid,), daemon=True).start()
     return jsonify(_job_get(jid)), 201
