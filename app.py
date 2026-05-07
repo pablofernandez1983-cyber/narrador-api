@@ -155,16 +155,9 @@ def _clean_markdown(t):
     t = re.sub(r'\n{3,}', '\n\n', t)
     return t.strip()
 
-_PREAMBLE_RE = re.compile(
-    r'^(listo|acá (va|te|está)|aquí (va|te|está|tenés)|claro (que sí|que si)?|'
-    r'por supuesto|con gusto|el usuario|como no (se |me )?|a continuación|'
-    r'te presento|preparé|voy a|este es (tu|el)|aquí tienes|bueno[,!])',
-    re.I
-)
-
 def _strip_preamble(text):
     paragraphs = [p for p in text.split('\n\n') if p.strip()]
-    if paragraphs and _PREAMBLE_RE.match(paragraphs[0].strip()):
+    if len(paragraphs) > 1 and len(paragraphs[0]) < 250:
         paragraphs = paragraphs[1:]
     return '\n\n'.join(paragraphs).strip()
 
@@ -201,14 +194,11 @@ def _generate_text(job):
     from anthropic import Anthropic
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    word_target = _word_target(job["prompt"])
-    user_content = job["prompt"]
-    if word_target:
-        user_content += (
-            f"\n\nObjetivo: {word_target} palabras exactas. "
-            f"No menciones este objetivo ni hagas ningún comentario sobre él. "
-            f"Arrancá directo con el contenido."
-        )
+    prompt = job["prompt"]
+    if not DURATION_RE.search(prompt):
+        prompt = prompt.rstrip(".! ") + ", de 30 minutos."
+    word_target = _word_target(prompt)
+    user_content = prompt
 
     kwargs = dict(
         model=job["model"],
