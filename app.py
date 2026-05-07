@@ -136,7 +136,7 @@ DURATION_RE = re.compile(
 def _word_target(prompt):
     m = DURATION_RE.search(prompt)
     if not m:
-        return None
+        return 30 * 155  # default 30 minutos
     n = float(m.group(1).replace(",", "."))
     minutes = n * 60 if m.group(2).lower().startswith("h") else n
     return round(minutes * 155)
@@ -174,9 +174,12 @@ SYSTEM_PROMPT = (
     "Respondé SIEMPRE con texto limpio listo para leer en voz alta: sin títulos, sin encabezados "
     "tipo 'Introducción', sin markdown, sin listas con viñetas, sin meta-comentarios tipo 'aquí tienes' "
     "o 'espero que te guste', sin citas tipo '[1]' ni URLs pegadas en el medio del texto. "
+    "PROHIBIDO empezar con frases de acuse de recibo como 'Listo', 'Acá va', 'Aquí te presento', "
+    "'Preparé este podcast', 'Con gusto', 'Por supuesto' o cualquier variante. "
+    "El texto arranca DIRECTAMENTE con el contenido, sin introducción ni preámbulo sobre la tarea. "
     "Solo párrafos naturales separados por líneas en blanco, con tono conversacional y fluido. "
-    "REGLA DE LARGO OBLIGATORIA: cuando el usuario pida una duración en minutos u horas, "
-    "el texto se convierte a audio a 155 palabras por minuto. Debés alcanzar ese largo EXACTO. "
+    "REGLA DE LARGO OBLIGATORIA: el texto se convierte a audio a 155 palabras por minuto. "
+    "Debés alcanzar el largo objetivo EXACTO. "
     "No termines antes. Si llegás al final del tema, desarrollá ejemplos, anécdotas, contexto histórico, "
     "comparaciones o reflexiones hasta completar el largo pedido. "
     "Es IMPERATIVO llegar al objetivo de palabras — quedarse corto es un error grave."
