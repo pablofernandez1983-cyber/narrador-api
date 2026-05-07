@@ -155,6 +155,19 @@ def _clean_markdown(t):
     t = re.sub(r'\n{3,}', '\n\n', t)
     return t.strip()
 
+_PREAMBLE_RE = re.compile(
+    r'^(listo|acá (va|te|está)|aquí (va|te|está|tenés)|claro (que sí|que si)?|'
+    r'por supuesto|con gusto|el usuario|como no (se |me )?|a continuación|'
+    r'te presento|preparé|voy a|este es (tu|el)|aquí tienes|bueno[,!])',
+    re.I
+)
+
+def _strip_preamble(text):
+    paragraphs = [p for p in text.split('\n\n') if p.strip()]
+    if paragraphs and _PREAMBLE_RE.match(paragraphs[0].strip()):
+        paragraphs = paragraphs[1:]
+    return '\n\n'.join(paragraphs).strip()
+
 def _split_text(text, max_bytes=3800):
     chunks, current = [], ''
     for p in re.split(r'\n\n+', text):
@@ -171,18 +184,16 @@ def _split_text(text, max_bytes=3800):
 
 SYSTEM_PROMPT = (
     "Sos un guionista que escribe contenido para ser narrado en audio en español rioplatense. "
-    "Respondé SIEMPRE con texto limpio listo para leer en voz alta: sin títulos, sin encabezados "
-    "tipo 'Introducción', sin markdown, sin listas con viñetas, sin meta-comentarios tipo 'aquí tienes' "
-    "o 'espero que te guste', sin citas tipo '[1]' ni URLs pegadas en el medio del texto. "
-    "PROHIBIDO empezar con frases de acuse de recibo como 'Listo', 'Acá va', 'Aquí te presento', "
-    "'Preparé este podcast', 'Con gusto', 'Por supuesto' o cualquier variante. "
-    "El texto arranca DIRECTAMENTE con el contenido, sin introducción ni preámbulo sobre la tarea. "
+    "Respondé SIEMPRE con texto limpio listo para leer en voz alta: sin títulos, sin encabezados, "
+    "sin markdown, sin listas con viñetas, sin URLs, sin citas tipo '[1]'. "
     "Solo párrafos naturales separados por líneas en blanco, con tono conversacional y fluido. "
-    "REGLA DE LARGO OBLIGATORIA: el texto se convierte a audio a 155 palabras por minuto. "
-    "Debés alcanzar el largo objetivo EXACTO. "
-    "No termines antes. Si llegás al final del tema, desarrollá ejemplos, anécdotas, contexto histórico, "
-    "comparaciones o reflexiones hasta completar el largo pedido. "
-    "Es IMPERATIVO llegar al objetivo de palabras — quedarse corto es un error grave."
+    "CRÍTICO — PRIMERA PALABRA: el texto debe empezar DIRECTAMENTE con el contenido. "
+    "Está terminantemente prohibido empezar con cualquier variante de: 'Listo', 'Acá va', 'Aquí', "
+    "'Claro', 'Por supuesto', 'Con gusto', 'El usuario', 'Como no', 'A continuación', 'Te presento', "
+    "'Preparé', 'Voy a', 'Este podcast'. La primera palabra debe ser parte del tema pedido. "
+    "LARGO: el texto se graba a 155 palabras/minuto. Cuando recibas un objetivo de palabras, "
+    "debés alcanzarlo EXACTAMENTE — quedarse corto es un error grave. "
+    "Si el tema se agota, desarrollá ejemplos, anécdotas, contexto histórico y reflexiones."
 )
 
 # ─── Job processor ────────────────────────────────────────────────
@@ -194,12 +205,9 @@ def _generate_text(job):
     user_content = job["prompt"]
     if word_target:
         user_content += (
-            f"\n\n[INSTRUCCIÓN INTERNA — NO la menciones ni la repitas en el texto: "
-            f"este texto se convierte a audio a 155 palabras/minuto. "
-            f"Debés escribir EXACTAMENTE {word_target} palabras (podés pasarte hasta un 10%, nunca quedarte corto). "
-            f"Llevá la cuenta mientras escribís. NO termines hasta llegar a {word_target} palabras. "
-            f"Si el tema se agota antes, profundizá con ejemplos, anécdotas, contexto, datos concretos y reflexiones. "
-            f"JAMÁS digas 'el usuario no especificó duración' ni ningún meta-comentario sobre el pedido.]"
+            f"\n\nObjetivo: {word_target} palabras exactas. "
+            f"No menciones este objetivo ni hagas ningún comentario sobre él. "
+            f"Arrancá directo con el contenido."
         )
 
     kwargs = dict(
@@ -289,6 +297,7 @@ def _process_job(jid):
             text_init = "🔎 Investigando en la web..." if job["web_search"] else "Pidiendo a Claude..."
             _job_update(jid, status=status_init, progress_pct=5, progress_text=text_init)
             text, searches = _generate_text(job)
+            text = _strip_preamble(text)
             title = text.split("\n")[0][:120].strip() or job["prompt"][:80]
             _job_update(jid, text_chars=len(text), title=title, search_count=searches)
 
