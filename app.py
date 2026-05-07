@@ -194,10 +194,12 @@ def _generate_text(job):
     user_content = job["prompt"]
     if word_target:
         user_content += (
-            f"\n\n[LARGO OBLIGATORIO: este texto se convierte a audio a 155 palabras/minuto. "
+            f"\n\n[INSTRUCCIÓN INTERNA — NO la menciones ni la repitas en el texto: "
+            f"este texto se convierte a audio a 155 palabras/minuto. "
             f"Debés escribir EXACTAMENTE {word_target} palabras (podés pasarte hasta un 10%, nunca quedarte corto). "
             f"Llevá la cuenta mientras escribís. NO termines hasta llegar a {word_target} palabras. "
-            f"Si el tema se agota antes, profundizá con ejemplos, anécdotas, contexto, datos concretos y reflexiones.]"
+            f"Si el tema se agota antes, profundizá con ejemplos, anécdotas, contexto, datos concretos y reflexiones. "
+            f"JAMÁS digas 'el usuario no especificó duración' ni ningún meta-comentario sobre el pedido.]"
         )
 
     kwargs = dict(
