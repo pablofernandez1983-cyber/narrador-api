@@ -155,9 +155,18 @@ def _clean_markdown(t):
     t = re.sub(r'\n{3,}', '\n\n', t)
     return t.strip()
 
+_PREAMBLE_START = re.compile(
+    r'^(el usuario|listo|acá|aquí|claro|por supuesto|con gusto|'
+    r'a continuación|te presento|preparé|voy a|bueno[,!\s]|perfecto|'
+    r'dado que|como no|entendido|por tu pedido|como el|como se)',
+    re.I
+)
+
 def _strip_preamble(text):
     paragraphs = [p for p in text.split('\n\n') if p.strip()]
-    if len(paragraphs) > 1 and len(paragraphs[0]) < 250:
+    if len(paragraphs) > 1 and (
+        len(paragraphs[0]) < 300 or _PREAMBLE_START.match(paragraphs[0].strip())
+    ):
         paragraphs = paragraphs[1:]
     return '\n\n'.join(paragraphs).strip()
 
@@ -198,12 +207,14 @@ def _generate_text(job):
     if not DURATION_RE.search(prompt):
         prompt = prompt.rstrip(".! ") + ", de 30 minutos."
     word_target = _word_target(prompt)
-    user_content = prompt + f" (son aproximadamente {word_target} palabras)"
+    user_content = prompt  # prompt limpio, sin meta-texto
+
+    system = SYSTEM_PROMPT + f" Objetivo de largo: {word_target} palabras exactas."
 
     kwargs = dict(
         model=job["model"],
         max_tokens=32000,
-        system=SYSTEM_PROMPT,
+        system=system,
         messages=[
             {
                 "role": "user",
