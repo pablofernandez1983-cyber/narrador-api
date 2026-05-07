@@ -163,12 +163,15 @@ _PREAMBLE_START = re.compile(
 )
 
 def _strip_preamble(text):
-    paragraphs = [p for p in text.split('\n\n') if p.strip()]
-    if len(paragraphs) > 1 and (
-        len(paragraphs[0]) < 300 or _PREAMBLE_START.match(paragraphs[0].strip())
-    ):
-        paragraphs = paragraphs[1:]
-    return '\n\n'.join(paragraphs).strip()
+    text = text.strip()
+    if not _PREAMBLE_START.match(text):
+        return text
+    # Preamble detectado: cortar en el primer salto de línea o fin de oración
+    for pat in [r'\n\n', r'\n', r'(?<=[.!?]) ']:
+        m = re.search(pat, text[:600])
+        if m:
+            return text[m.end():].strip()
+    return text
 
 def _split_text(text, max_bytes=3800):
     chunks, current = [], ''
@@ -204,10 +207,14 @@ def _generate_text(job):
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
     prompt = job["prompt"]
-    if not DURATION_RE.search(prompt):
+    has_duration = bool(DURATION_RE.search(prompt))
+    if not has_duration:
         prompt = prompt.rstrip(".! ") + ", de 30 minutos."
     word_target = _word_target(prompt)
     user_content = prompt  # prompt limpio, sin meta-texto
+
+    print(f"[NARRADOR] job={job['id'][:8]} has_duration={has_duration} word_target={word_target}")
+    print(f"[NARRADOR] user_content={user_content[:200]!r}")
 
     system = SYSTEM_PROMPT + f" Objetivo de largo: {word_target} palabras exactas."
 
@@ -313,7 +320,9 @@ def _process_job(jid):
             text_init = "🔎 Investigando en la web..." if job["web_search"] else "Pidiendo a Claude..."
             _job_update(jid, status=status_init, progress_pct=5, progress_text=text_init)
             text, searches = _generate_text(job)
+            print(f"[NARRADOR] raw_text primeros 300: {text[:300]!r}")
             text = _strip_preamble(text)
+            print(f"[NARRADOR] after_strip primeros 200: {text[:200]!r}")
             title = text.split("\n")[0][:120].strip() or job["prompt"][:80]
             _job_update(jid, text_chars=len(text), title=title, search_count=searches)
 
