@@ -204,7 +204,22 @@ def _generate_text(job):
         model=job["model"],
         max_tokens=32000,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
+        messages=[
+            {
+                "role": "user",
+                "content": "Hacé un podcast de 5 minutos sobre los gatos domésticos.",
+            },
+            {
+                "role": "assistant",
+                "content": (
+                    "Los gatos llevan miles de años conviviendo con el ser humano, "
+                    "y aun así siguen siendo una de las criaturas más misteriosas del planeta. "
+                    "No se sabe con exactitud cuándo ni dónde se produjo la primera domesticación, "
+                    "pero los registros más antiguos los ubican en el antiguo Egipto, hace unos cuatro mil años."
+                ),
+            },
+            {"role": "user", "content": user_content},
+        ],
     )
     if job["web_search"]:
         kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}]
