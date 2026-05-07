@@ -198,7 +198,7 @@ def _generate_text(job):
     if not DURATION_RE.search(prompt):
         prompt = prompt.rstrip(".! ") + ", de 30 minutos."
     word_target = _word_target(prompt)
-    user_content = prompt
+    user_content = prompt + f" (son aproximadamente {word_target} palabras)"
 
     kwargs = dict(
         model=job["model"],
