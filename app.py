@@ -347,9 +347,10 @@ def health():
 def jobs_create():
     if (err := _check_auth()):
         return err
-    body   = request.get_json() or {}
+    body   = request.get_json(force=True, silent=True) or {}
     prompt = (body.get("prompt") or "").strip()
     text   = (body.get("text")   or "").strip()
+    print(f"[JOBS_CREATE] prompt={prompt[:80]!r} text={text[:80]!r} body_keys={list(body.keys())}")
 
     if not prompt and not text:
         return jsonify({"error": "prompt o text requerido"}), 400
