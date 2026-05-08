@@ -15,7 +15,7 @@ import requests
 DATABASE_URL      = os.environ.get("DATABASE_URL", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 GOOGLE_TTS_KEY    = os.environ.get("GOOGLE_TTS_API_KEY", "")
-NARRADOR_API_KEY  = os.environ.get("NARRADOR_API_KEY", "")  # auth del backend
+NARRADOR_API_KEY  = os.environ.get("NARRADOR_API_KEY", "")
 
 S3_BUCKET   = os.environ.get("AWS_S3_BUCKET_NAME", "")
 S3_ENDPOINT = os.environ.get("AWS_ENDPOINT_URL", "")
@@ -30,7 +30,7 @@ CORS(app)
 # ─── Auth ─────────────────────────────────────────────────────────
 def _check_auth():
     if not NARRADOR_API_KEY:
-        return None  # sin NARRADOR_API_KEY configurado, libre (dev local)
+        return None
     if request.headers.get("X-API-Key", "") != NARRADOR_API_KEY:
         return jsonify({"error": "unauthorized"}), 401
     return None
@@ -155,24 +155,6 @@ def _clean_markdown(t):
     t = re.sub(r'\n{3,}', '\n\n', t)
     return t.strip()
 
-_PREAMBLE_START = re.compile(
-    r'^(el usuario|listo|acá|aquí|claro|por supuesto|con gusto|'
-    r'a continuación|te presento|preparé|voy a|bueno[,!\s]|perfecto|'
-    r'dado que|como no|entendido|por tu pedido|como el|como se)',
-    re.I
-)
-
-def _strip_preamble(text):
-    text = text.strip()
-    if not _PREAMBLE_START.match(text):
-        return text
-    # Preamble detectado: cortar en el primer salto de línea o fin de oración
-    for pat in [r'\n\n', r'\n', r'(?<=[.!?]) ']:
-        m = re.search(pat, text[:600])
-        if m:
-            return text[m.end():].strip()
-    return text
-
 def _split_text(text, max_bytes=3800):
     chunks, current = [], ''
     for p in re.split(r'\n\n+', text):
@@ -190,14 +172,12 @@ def _split_text(text, max_bytes=3800):
 SYSTEM_PROMPT = (
     "Sos un guionista que escribe contenido para ser narrado en audio en español rioplatense. "
     "Respondé SIEMPRE con texto limpio listo para leer en voz alta: sin títulos, sin encabezados, "
-    "sin markdown, sin listas con viñetas, sin URLs, sin citas tipo '[1]'. "
+    "sin markdown, sin listas con viñetas, sin meta-comentarios, sin URLs, sin citas tipo '[1]'. "
+    "IMPORTANTE: empezá SIEMPRE directo con el contenido del tema. "
+    "Nunca confirmes el pedido, nunca saludes, nunca digas cuánto va a durar — la primera palabra tiene que ser del tema. "
     "Solo párrafos naturales separados por líneas en blanco, con tono conversacional y fluido. "
-    "CRÍTICO — PRIMERA PALABRA: el texto debe empezar DIRECTAMENTE con el contenido. "
-    "Está terminantemente prohibido empezar con cualquier variante de: 'Listo', 'Acá va', 'Aquí', "
-    "'Claro', 'Por supuesto', 'Con gusto', 'El usuario', 'Como no', 'A continuación', 'Te presento', "
-    "'Preparé', 'Voy a', 'Este podcast'. La primera palabra debe ser parte del tema pedido. "
-    "LARGO: el texto se graba a 155 palabras/minuto. Cuando recibas un objetivo de palabras, "
-    "debés alcanzarlo EXACTAMENTE — quedarse corto es un error grave. "
+    "REGLA DE LARGO: el texto se graba a 155 palabras por minuto. "
+    "Debés alcanzar el largo pedido EXACTAMENTE — quedarse corto es un error grave. "
     "Si el tema se agota, desarrollá ejemplos, anécdotas, contexto histórico y reflexiones."
 )
 
@@ -206,22 +186,12 @@ def _generate_text(job):
     from anthropic import Anthropic
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
-    prompt = job["prompt"]
-    has_duration = bool(DURATION_RE.search(prompt))
-    if not has_duration:
-        prompt = prompt.rstrip(".! ") + ", de 30 minutos."
-    word_target = _word_target(prompt)
-    user_content = prompt  # prompt limpio, sin meta-texto
-
-    print(f"[NARRADOR] job={job['id'][:8]} has_duration={has_duration} word_target={word_target}")
-    print(f"[NARRADOR] user_content={user_content[:200]!r}")
-
-    system = SYSTEM_PROMPT + f" Objetivo de largo: {word_target} palabras exactas."
+    word_target = _word_target(job["prompt"])
 
     kwargs = dict(
         model=job["model"],
         max_tokens=32000,
-        system=system,
+        system=SYSTEM_PROMPT,
         messages=[
             {
                 "role": "user",
@@ -231,12 +201,17 @@ def _generate_text(job):
                 "role": "assistant",
                 "content": (
                     "Los gatos llevan miles de años conviviendo con el ser humano, "
-                    "y aun así siguen siendo una de las criaturas más misteriosas del planeta. "
-                    "No se sabe con exactitud cuándo ni dónde se produjo la primera domesticación, "
-                    "pero los registros más antiguos los ubican en el antiguo Egipto, hace unos cuatro mil años."
+                    "y aun así siguen siendo una de las criaturas más misteriosas del planeta."
                 ),
             },
-            {"role": "user", "content": user_content},
+            {
+                "role": "user",
+                "content": (
+                    job["prompt"]
+                    if DURATION_RE.search(job["prompt"])
+                    else job["prompt"].rstrip(".! ") + ", de 30 minutos."
+                ),
+            },
         ],
     )
     if job["web_search"]:
@@ -245,7 +220,7 @@ def _generate_text(job):
     full_text = ""
     search_count = 0
     last_update = 0
-    bar_target = (word_target or 4500) * 6  # chars estimados
+    bar_target = word_target * 6
 
     with client.messages.stream(**kwargs) as stream:
         for event in stream:
@@ -320,9 +295,6 @@ def _process_job(jid):
             text_init = "🔎 Investigando en la web..." if job["web_search"] else "Pidiendo a Claude..."
             _job_update(jid, status=status_init, progress_pct=5, progress_text=text_init)
             text, searches = _generate_text(job)
-            print(f"[NARRADOR] raw_text primeros 300: {text[:300]!r}")
-            text = _strip_preamble(text)
-            print(f"[NARRADOR] after_strip primeros 200: {text[:200]!r}")
             title = text.split("\n")[0][:120].strip() or job["prompt"][:80]
             _job_update(jid, text_chars=len(text), title=title, search_count=searches)
 
@@ -350,7 +322,6 @@ def jobs_create():
     body   = request.get_json(force=True, silent=True) or {}
     prompt = (body.get("prompt") or "").strip()
     text   = (body.get("text")   or "").strip()
-    print(f"[JOBS_CREATE] prompt={prompt[:80]!r} text={text[:80]!r} body_keys={list(body.keys())}")
 
     if not prompt and not text:
         return jsonify({"error": "prompt o text requerido"}), 400
@@ -407,7 +378,7 @@ def jobs_audio(jid):
 @app.route("/synth", methods=["POST"])
 def synth():
     if (err := _check_auth()): return err
-    body = request.get_json() or {}
+    body = request.get_json(force=True, silent=True) or {}
     text  = (body.get("text") or "").strip()
     voice = body.get("voice") or "Achird"
     speed = float(body.get("speed") or 1.0)
