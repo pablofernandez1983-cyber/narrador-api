@@ -156,19 +156,23 @@ def _clean_markdown(t):
     return t.strip()
 
 def _generate_title(text):
-    """Generate a 3-10 word descriptive podcast title using Claude."""
+    """Generate a 3-5 word informative podcast title using Claude."""
     from anthropic import Anthropic
     try:
         client = Anthropic(api_key=ANTHROPIC_API_KEY)
         msg = client.messages.create(
             model="claude-haiku-4-5",
-            max_tokens=60,
+            max_tokens=40,
             messages=[{
                 "role": "user",
                 "content": (
-                    "Generá un título descriptivo de 3 a 10 palabras en español para un podcast "
-                    "sobre el siguiente tema. Respondé SOLO con el título, sin comillas, sin "
-                    f"puntuación final.\n\nTema: {text[:500]}"
+                    "Generá un título de exactamente 3 a 5 palabras en español que describa "
+                    "claramente el tema del siguiente texto. El título debe ser informativo y "
+                    "directo, no poético ni creativo. Ejemplos del estilo esperado: "
+                    "\"Historia del tango rioplatense\", \"Cambio de figuritas Panini\", "
+                    "\"Economía argentina en 2024\". "
+                    "Respondé SOLO con el título, sin comillas, sin puntuación final.\n\n"
+                    f"Texto: {text[:400]}"
                 ),
             }],
         )
