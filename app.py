@@ -54,17 +54,17 @@ def _job_from_row(r):
     d["speed"] = float(d.get("speed") or 1.0)
     return d
 
-def _job_create(data):
+def _job_create(data, title=""):
     jid = str(uuid.uuid4())
     c, RDC = _conn()
     try:
         with c.cursor() as cur:
             cur.execute("""
                 INSERT INTO narrador_jobs
-                  (id, prompt, model, voice, speed, web_search, status, progress_pct, search_count)
-                VALUES (%s, %s, %s, %s, %s, %s, 'pending', 0, 0)
+                  (id, prompt, model, voice, speed, web_search, status, progress_pct, search_count, title)
+                VALUES (%s, %s, %s, %s, %s, %s, 'pending', 0, 0, %s)
             """, (jid, data["prompt"], data["model"], data["voice"],
-                  data["speed"], data["web_search"]))
+                  data["speed"], data["web_search"], title or None))
         c.commit()
     finally:
         c.close()
@@ -154,6 +154,27 @@ def _clean_markdown(t):
     t = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', t)
     t = re.sub(r'\n{3,}', '\n\n', t)
     return t.strip()
+
+def _generate_title(text):
+    """Generate a 3-10 word descriptive podcast title using Claude."""
+    from anthropic import Anthropic
+    try:
+        client = Anthropic(api_key=ANTHROPIC_API_KEY)
+        msg = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=60,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Generá un título descriptivo de 3 a 10 palabras en español para un podcast "
+                    "sobre el siguiente tema. Respondé SOLO con el título, sin comillas, sin "
+                    f"puntuación final.\n\nTema: {text[:500]}"
+                ),
+            }],
+        )
+        return msg.content[0].text.strip()[:150]
+    except Exception:
+        return text[:80].strip()
 
 def _split_text(text, max_bytes=3800):
     chunks, current = [], ''
@@ -287,16 +308,14 @@ def _process_job(jid):
 
         if job["model"] == "direct":
             text = job["prompt"]
-            title = text.split("\n")[0][:120].strip() or "Audio"
             _job_update(jid, status="recording", progress_pct=10,
-                        progress_text="Grabando audio...", title=title)
+                        progress_text="Grabando audio...")
         else:
             status_init = "writing"
             text_init = "🔎 Investigando en la web..." if job["web_search"] else "Pidiendo a Claude..."
             _job_update(jid, status=status_init, progress_pct=5, progress_text=text_init)
             text, searches = _generate_text(job)
-            title = text.split("\n")[0][:120].strip() or job["prompt"][:80]
-            _job_update(jid, text_chars=len(text), title=title, search_count=searches)
+            _job_update(jid, text_chars=len(text), search_count=searches)
 
         audio_key, audio_size = _generate_audio(job, text)
         _job_update(jid, status="done", progress_pct=100,
@@ -343,7 +362,8 @@ def jobs_create():
             "web_search": bool(body.get("web_search")),
         }
 
-    jid = _job_create(data)
+    title = _generate_title(data["prompt"])
+    jid = _job_create(data, title)
     threading.Thread(target=_process_job, args=(jid,), daemon=True).start()
     return jsonify(_job_get(jid)), 201
 
