@@ -252,17 +252,22 @@ def _generate_text(job):
 
 def _synth_chunk(args):
     chunk, voice, speed = args
-    r = requests.post(
-        f"https://texttospeech.googleapis.com/v1beta1/text:synthesize?key={GOOGLE_TTS_KEY}",
-        json={
-            "input": {"text": chunk},
-            "voice": {"languageCode": "es-US", "name": f"es-US-Chirp3-HD-{voice}"},
-            "audioConfig": {"audioEncoding": "MP3", "speakingRate": speed},
-        },
-        timeout=60,
-    )
-    r.raise_for_status()
-    return base64.b64decode(r.json()["audioContent"])
+    import time
+    for attempt in range(3):
+        r = requests.post(
+            f"https://texttospeech.googleapis.com/v1beta1/text:synthesize?key={GOOGLE_TTS_KEY}",
+            json={
+                "input": {"text": chunk},
+                "voice": {"languageCode": "es-US", "name": f"es-US-Chirp3-HD-{voice}"},
+                "audioConfig": {"audioEncoding": "MP3", "speakingRate": speed},
+            },
+            timeout=60,
+        )
+        if r.status_code in (429, 500, 503) and attempt < 2:
+            time.sleep(2 ** attempt)
+            continue
+        r.raise_for_status()
+        return base64.b64decode(r.json()["audioContent"])
 
 def _generate_audio(job, text):
     chunks = _split_text(_clean_markdown(text))
