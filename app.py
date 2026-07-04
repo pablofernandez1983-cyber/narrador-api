@@ -16,6 +16,7 @@ DATABASE_URL      = os.environ.get("DATABASE_URL", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 GOOGLE_TTS_KEY    = os.environ.get("GOOGLE_TTS_API_KEY", "")
 NARRADOR_API_KEY  = os.environ.get("NARRADOR_API_KEY", "")
+GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY", "")
 
 S3_BUCKET   = os.environ.get("AWS_S3_BUCKET_NAME", "")
 S3_ENDPOINT = os.environ.get("AWS_ENDPOINT_URL", "")
@@ -284,15 +285,66 @@ def _generate_audio(job, text):
     _s3_put(key, audio)
     return key, len(audio)
 
+def _gemini_title(source):
+    """Genera un título corto y específico con Gemini a partir del prompt/texto.
+    Devuelve None si no hay key o si la llamada falla (el caller usa un fallback).
+    gemini-2.5-flash es un modelo 'thinking': con thinkingBudget=0 responde directo
+    y no gasta el presupuesto de tokens pensando (evita respuestas vacías)."""
+    if not GEMINI_API_KEY:
+        return None
+    context = (source or "").strip()[:800]
+    if not context:
+        return None
+    try:
+        resp = requests.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-2.5-flash:generateContent",
+            params={"key": GEMINI_API_KEY},
+            json={
+                "contents": [{"parts": [{"text":
+                    'Generá un título en español de hasta 10 palabras para este podcast. '
+                    'El título debe ser MUY ESPECÍFICO: incluí los nombres propios, palabras '
+                    'clave y términos exactos del tema. Nunca uses títulos genéricos. Solo el '
+                    'título, sin comillas ni puntuación final.\n\nContenido:\n' + context
+                }]}],
+                "generationConfig": {
+                    "thinkingConfig": {"thinkingBudget": 0},
+                    "maxOutputTokens": 40,
+                    "temperature": 0.4,
+                },
+            },
+            timeout=20,
+        )
+        if not resp.ok:
+            print("gemini_title HTTP", resp.status_code, resp.text[:300])
+            return None
+        data = resp.json()
+        cand = (data.get("candidates") or [None])[0] or {}
+        parts = ((cand.get("content") or {}).get("parts")) or []
+        title = "".join(p.get("text", "") for p in parts).strip().strip('"\'«».').strip()
+        if title and len(title) < 100:
+            return title
+        print("gemini_title vacío. finishReason=", cand.get("finishReason"))
+        return None
+    except Exception as e:
+        print("gemini_title error", repr(e))
+        return None
+
 def _process_job(jid):
     try:
         job = _job_get(jid)
         if not job:
             return
 
+        # Título con Gemini apenas arranca (aparece rápido vía polling).
+        # Si falla, se usa el fallback de primera línea más abajo.
+        gtitle = _gemini_title(job["prompt"])
+        if gtitle:
+            _job_update(jid, title=gtitle)
+
         if job["model"] == "direct":
             text = job["prompt"]
-            title = text.split("\n")[0][:120].strip() or "Audio"
+            title = gtitle or text.split("\n")[0][:120].strip() or "Audio"
             _job_update(jid, status="recording", progress_pct=10,
                         progress_text="Grabando audio...", title=title)
         else:
@@ -300,7 +352,7 @@ def _process_job(jid):
             text_init = "🔎 Investigando en la web..." if job["web_search"] else "Pidiendo a Claude..."
             _job_update(jid, status=status_init, progress_pct=5, progress_text=text_init)
             text, searches = _generate_text(job)
-            title = text.split("\n")[0][:120].strip() or job["prompt"][:80]
+            title = gtitle or text.split("\n")[0][:120].strip() or job["prompt"][:80]
             _job_update(jid, text_chars=len(text), title=title, search_count=searches)
 
         audio_key, audio_size = _generate_audio(job, text)
