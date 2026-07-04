@@ -188,66 +188,79 @@ def _generate_text(job):
     client = Anthropic(api_key=ANTHROPIC_API_KEY)
 
     word_target = _word_target(job["prompt"])
+    minutes = max(1, round(word_target / 155))
 
-    kwargs = dict(
-        model=job["model"],
-        max_tokens=32000,
-        system=SYSTEM_PROMPT,
-        messages=[
-            {
-                "role": "user",
-                "content": "Hacé un podcast de 5 minutos sobre los gatos domésticos.",
-            },
-            {
-                "role": "assistant",
-                "content": (
-                    "Los gatos llevan miles de años conviviendo con el ser humano, "
-                    "y aun así siguen siendo una de las criaturas más misteriosas del planeta."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    job["prompt"]
-                    if DURATION_RE.search(job["prompt"])
-                    else job["prompt"].rstrip(".! ") + ", de 30 minutos."
-                ),
-            },
-        ],
-    )
+    # Pedido inicial: además del tema, le damos a Claude el largo EXPLÍCITO en palabras
+    # (antes sólo veía "de X minutos" y tenía que deducir el conteo, y se quedaba corto).
+    ask = (job["prompt"]
+           if DURATION_RE.search(job["prompt"])
+           else job["prompt"].rstrip(".! ") + ", de 30 minutos.")
+    ask += (f"\n\nOBJETIVO DE LARGO: el guión debe tener al menos {word_target} palabras "
+            f"(~{minutes} minutos narrados a 155 palabras por minuto). No concluyas ni te "
+            f"despidas antes de alcanzar ese largo.")
+
+    messages = [
+        {"role": "user", "content": "Hacé un podcast de 5 minutos sobre los gatos domésticos."},
+        {"role": "assistant", "content": (
+            "Los gatos llevan miles de años conviviendo con el ser humano, "
+            "y aun así siguen siendo una de las criaturas más misteriosas del planeta.")},
+        {"role": "user", "content": ask},
+    ]
+
+    base_kwargs = dict(model=job["model"], max_tokens=32000, system=SYSTEM_PROMPT)
     if job["web_search"]:
-        kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}]
+        base_kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}]
 
     full_text = ""
     search_count = 0
-    last_update = 0
     bar_target = word_target * 6
 
-    with client.messages.stream(**kwargs) as stream:
-        for event in stream:
-            et = getattr(event, "type", None)
-
-            if et == "content_block_start":
-                block = getattr(event, "content_block", None)
-                if block and getattr(block, "type", None) == "server_tool_use" \
-                        and getattr(block, "name", None) == "web_search":
-                    search_count += 1
-                    _job_update(job["id"],
-                                progress_text=f"🔎 Buscando en la web ({search_count})...",
-                                search_count=search_count)
-
-            elif et == "content_block_delta":
-                delta = getattr(event, "delta", None)
-                if delta and getattr(delta, "type", None) == "text_delta":
-                    full_text += delta.text
-                    if len(full_text) - last_update > 600:
-                        words = round(len(full_text) / 6)
-                        pct = min(int(len(full_text) / bar_target * 80), 80)
-                        search_info = f" · 🔎{search_count}" if search_count else ""
+    def stream_turn():
+        nonlocal full_text, search_count
+        last_update = 0
+        with client.messages.stream(messages=messages, **base_kwargs) as stream:
+            for event in stream:
+                et = getattr(event, "type", None)
+                if et == "content_block_start":
+                    block = getattr(event, "content_block", None)
+                    if block and getattr(block, "type", None) == "server_tool_use" \
+                            and getattr(block, "name", None) == "web_search":
+                        search_count += 1
                         _job_update(job["id"],
-                                    progress_pct=pct, text_chars=len(full_text),
-                                    progress_text=f"Escribiendo · {words} palabras{search_info}")
-                        last_update = len(full_text)
+                                    progress_text=f"🔎 Buscando en la web ({search_count})...",
+                                    search_count=search_count)
+                elif et == "content_block_delta":
+                    delta = getattr(event, "delta", None)
+                    if delta and getattr(delta, "type", None) == "text_delta":
+                        full_text += delta.text
+                        if len(full_text) - last_update > 600:
+                            words = round(len(full_text) / 6)
+                            pct = min(int(len(full_text) / bar_target * 80), 80)
+                            search_info = f" · 🔎{search_count}" if search_count else ""
+                            _job_update(job["id"],
+                                        progress_pct=pct, text_chars=len(full_text),
+                                        progress_text=f"Escribiendo · {words} palabras{search_info}")
+                            last_update = len(full_text)
+
+    stream_turn()
+
+    # Loop de continuación: Haiku suele cerrar el tema antes de llegar al largo pedido.
+    # Si quedó corto, le pedimos que siga desarrollando hasta ~alcanzar el target.
+    tries = 0
+    while round(len(full_text) / 6) < word_target * 0.9 and tries < 4:
+        tries += 1
+        remaining = word_target - round(len(full_text) / 6)
+        messages.append({"role": "assistant", "content": full_text})
+        messages.append({"role": "user", "content": (
+            f"Seguí desarrollando exactamente el mismo tema, sin repetir lo ya dicho y sin "
+            f"concluir todavía. Faltan unas {remaining} palabras. Agregá más ejemplos, "
+            f"anécdotas, datos concretos, contexto histórico y matices. Continuá el hilo "
+            f"directamente, sin frases de transición tipo 'siguiendo con' ni saludos.")})
+        before = len(full_text)
+        full_text += "\n\n"
+        stream_turn()
+        if len(full_text) - before < 300:  # el modelo ya no aporta más: cortamos
+            break
 
     return full_text, search_count
 
