@@ -20,3 +20,19 @@ CREATE TABLE IF NOT EXISTS narrador_jobs (
 );
 
 CREATE INDEX IF NOT EXISTS narrador_jobs_created_idx ON narrador_jobs(created_at DESC);
+
+-- Biblioteca (app Android): carpetas + progreso de escucha.
+-- app.py lo aplica solo al arrancar (_ensure_schema), queda acá como referencia.
+ALTER TABLE narrador_jobs
+  ADD COLUMN IF NOT EXISTS folder      TEXT,
+  ADD COLUMN IF NOT EXISTS position_ms BIGINT  NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS duration_ms BIGINT,
+  ADD COLUMN IF NOT EXISTS listened    BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS played_at   TIMESTAMPTZ;
+
+CREATE TABLE IF NOT EXISTS narrador_folders (
+  name       TEXT        PRIMARY KEY,
+  position   INT         NOT NULL DEFAULT 0,
+  sort       TEXT        NOT NULL DEFAULT 'desc',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

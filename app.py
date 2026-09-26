@@ -52,8 +52,40 @@ def _job_from_row(r):
         d["created_at"] = d["created_at"].isoformat()
     if d.get("updated_at"):
         d["updated_at"] = d["updated_at"].isoformat()
+    if d.get("played_at"):
+        d["played_at"] = d["played_at"].isoformat()
     d["speed"] = float(d.get("speed") or 1.0)
     return d
+
+def _ensure_schema():
+    """Columnas/tabla de la biblioteca (carpetas + progreso de escucha) que usa la app Android.
+    Idempotente: corre al arrancar el proceso."""
+    c, _ = _conn()
+    try:
+        with c.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE narrador_jobs
+                  ADD COLUMN IF NOT EXISTS folder      TEXT,
+                  ADD COLUMN IF NOT EXISTS position_ms BIGINT  NOT NULL DEFAULT 0,
+                  ADD COLUMN IF NOT EXISTS duration_ms BIGINT,
+                  ADD COLUMN IF NOT EXISTS listened    BOOLEAN NOT NULL DEFAULT false,
+                  ADD COLUMN IF NOT EXISTS played_at   TIMESTAMPTZ;
+                CREATE TABLE IF NOT EXISTS narrador_folders (
+                  name       TEXT        PRIMARY KEY,
+                  position   INT         NOT NULL DEFAULT 0,
+                  sort       TEXT        NOT NULL DEFAULT 'desc',
+                  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+            """)
+        c.commit()
+    finally:
+        c.close()
+
+if DATABASE_URL:
+    try:
+        _ensure_schema()
+    except Exception:
+        traceback.print_exc()
 
 def _job_create(data):
     jid = str(uuid.uuid4())
@@ -62,10 +94,10 @@ def _job_create(data):
         with c.cursor() as cur:
             cur.execute("""
                 INSERT INTO narrador_jobs
-                  (id, prompt, model, voice, speed, web_search, status, progress_pct, search_count)
-                VALUES (%s, %s, %s, %s, %s, %s, 'pending', 0, 0)
+                  (id, prompt, model, voice, speed, web_search, status, progress_pct, search_count, folder)
+                VALUES (%s, %s, %s, %s, %s, %s, 'pending', 0, 0, %s)
             """, (jid, data["prompt"], data["model"], data["voice"],
-                  data["speed"], data["web_search"]))
+                  data["speed"], data["web_search"], data.get("folder")))
         c.commit()
     finally:
         c.close()
@@ -125,6 +157,10 @@ def _s3_put(key, body):
 
 def _s3_get(key):
     return _s3().get_object(Bucket=S3_BUCKET, Key=key)["Body"].read()
+
+def _s3_get_range(key, rng):
+    o = _s3().get_object(Bucket=S3_BUCKET, Key=key, Range=rng)
+    return o["Body"].read(), o.get("ContentRange")
 
 def _s3_delete(key):
     _s3().delete_object(Bucket=S3_BUCKET, Key=key)
@@ -412,6 +448,9 @@ def jobs_create():
             "speed":      float(body.get("speed") or 1.0),
             "web_search": bool(body.get("web_search")),
         }
+    data["folder"] = (body.get("folder") or "").strip() or None
+    if data["folder"]:
+        _folder_ensure(data["folder"])
 
     jid = _job_create(data)
     threading.Thread(target=_process_job, args=(jid,), daemon=True).start()
@@ -421,7 +460,8 @@ def jobs_create():
 def jobs_list():
     if (err := _check_auth()):
         return err
-    return jsonify(_job_list())
+    limit = max(1, min(int(request.args.get("limit") or 50), 1000))
+    return jsonify(_job_list(limit))
 
 @app.route("/jobs/<jid>", methods=["GET"])
 def jobs_get(jid):
@@ -440,10 +480,114 @@ def jobs_audio(jid):
     if not job or not job.get("audio_key"):
         return jsonify({"error": "audio no disponible"}), 404
 
-    audio = _s3_get(job["audio_key"])
     safe = re.sub(r'\s+', '_', re.sub(r'[^\w\s-]', '', job.get("title") or "narrador")).lower()[:60] or "narrador"
-    return Response(audio, mimetype="audio/mpeg",
-                    headers={"Content-Disposition": f'inline; filename="{safe}.mp3"'})
+    headers = {"Content-Disposition": f'inline; filename="{safe}.mp3"', "Accept-Ranges": "bytes"}
+    rng = request.headers.get("Range", "")
+    if rng.startswith("bytes="):
+        # Pedido parcial (streaming con seek desde la app / el <audio> del navegador)
+        audio, content_range = _s3_get_range(job["audio_key"], rng)
+        if content_range:
+            headers["Content-Range"] = content_range
+        return Response(audio, status=206, mimetype="audio/mpeg", headers=headers)
+    audio = _s3_get(job["audio_key"])
+    return Response(audio, mimetype="audio/mpeg", headers=headers)
+
+# ─── Biblioteca: progreso y carpetas (app Android) ────────────────
+JOB_PATCHABLE = {"folder", "position_ms", "duration_ms", "listened", "title"}
+
+@app.route("/jobs/<jid>", methods=["PATCH"])
+def jobs_patch(jid):
+    if (err := _check_auth()):
+        return err
+    body = request.get_json(force=True, silent=True) or {}
+    fields = {k: v for k, v in body.items() if k in JOB_PATCHABLE}
+    if "folder" in fields:
+        fields["folder"] = (fields["folder"] or "").strip() or None
+        if fields["folder"]:
+            _folder_ensure(fields["folder"])
+    if "position_ms" in fields:
+        fields["played_at"] = datetime.now(timezone.utc)
+    if not fields:
+        return jsonify({"error": "nada para actualizar"}), 400
+    if not _job_get(jid):
+        return jsonify({"error": "not found"}), 404
+    _job_update(jid, **fields)
+    return jsonify(_job_get(jid))
+
+def _folder_ensure(name):
+    c, _ = _conn()
+    try:
+        with c.cursor() as cur:
+            cur.execute("""
+                INSERT INTO narrador_folders (name, position)
+                VALUES (%s, (SELECT COALESCE(MAX(position), 0) + 1 FROM narrador_folders))
+                ON CONFLICT (name) DO NOTHING
+            """, (name,))
+        c.commit()
+    finally:
+        c.close()
+
+def _folder_list():
+    c, RDC = _conn()
+    try:
+        with c.cursor(cursor_factory=RDC) as cur:
+            cur.execute("SELECT name, position, sort FROM narrador_folders ORDER BY position, name")
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        c.close()
+
+@app.route("/folders", methods=["GET"])
+def folders_list():
+    if (err := _check_auth()):
+        return err
+    return jsonify(_folder_list())
+
+@app.route("/folders", methods=["POST"])
+def folders_create():
+    if (err := _check_auth()):
+        return err
+    name = ((request.get_json(force=True, silent=True) or {}).get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name requerido"}), 400
+    _folder_ensure(name)
+    return jsonify(_folder_list()), 201
+
+@app.route("/folders/<path:name>", methods=["PATCH"])
+def folders_patch(name):
+    """Renombrar (arrastra los episodios), cambiar el orden de la carpeta o su posición."""
+    if (err := _check_auth()):
+        return err
+    body = request.get_json(force=True, silent=True) or {}
+    new_name = (body.get("name") or "").strip()
+    c, _ = _conn()
+    try:
+        with c.cursor() as cur:
+            if body.get("sort") in ("asc", "desc"):
+                cur.execute("UPDATE narrador_folders SET sort = %s WHERE name = %s", (body["sort"], name))
+            if isinstance(body.get("position"), int):
+                cur.execute("UPDATE narrador_folders SET position = %s WHERE name = %s", (body["position"], name))
+            if new_name and new_name != name:
+                cur.execute("UPDATE narrador_folders SET name = %s WHERE name = %s", (new_name, name))
+                cur.execute("UPDATE narrador_jobs SET folder = %s WHERE folder = %s", (new_name, name))
+        c.commit()
+    finally:
+        c.close()
+    return jsonify(_folder_list())
+
+@app.route("/folders/<path:name>", methods=["DELETE"])
+def folders_delete(name):
+    """Borra la carpeta; sus episodios vuelven a 'Nuevos' (folder NULL), no se borran."""
+    if (err := _check_auth()):
+        return err
+    c, _ = _conn()
+    try:
+        with c.cursor() as cur:
+            cur.execute("UPDATE narrador_jobs SET folder = NULL WHERE folder = %s", (name,))
+            cur.execute("DELETE FROM narrador_folders WHERE name = %s", (name,))
+        c.commit()
+    finally:
+        c.close()
+    return jsonify(_folder_list())
 
 @app.route("/synth", methods=["POST"])
 def synth():
