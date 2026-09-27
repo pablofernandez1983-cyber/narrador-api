@@ -253,9 +253,17 @@ def _generate_text(job):
         {"role": "user", "content": ask},
     ]
 
-    base_kwargs = dict(model=job["model"], max_tokens=32000, system=SYSTEM_PROMPT)
+    model = job["model"]
+    haiku = model.startswith("claude-haiku")
+    # Los modelos nuevos piensan antes de escribir y eso cuenta en max_tokens: más margen.
+    base_kwargs = dict(model=model, max_tokens=32000 if haiku else 64000, system=SYSTEM_PROMPT)
     if job["web_search"]:
-        base_kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}]
+        # web_search_20260209 (filtrado dinámico) en Sonnet/Opus/Fable nuevos; Haiku usa la básica
+        search_type = "web_search_20250305" if haiku else "web_search_20260209"
+        base_kwargs["tools"] = [{"type": search_type, "name": "web_search", "max_uses": 6}]
+    # Fable y Opus 5.x: si un clasificador de seguridad rechaza el pedido, el servidor reintenta
+    # solo con otro modelo (server-side fallback) en vez de devolver un guión vacío.
+    use_fallback = model.startswith(("claude-fable", "claude-opus-5"))
 
     full_text = ""
     search_count = 0
@@ -264,7 +272,12 @@ def _generate_text(job):
     def stream_turn():
         nonlocal full_text, search_count
         last_update = 0
-        with client.messages.stream(messages=messages, **base_kwargs) as stream:
+        if use_fallback:
+            ctx = client.beta.messages.stream(messages=messages, betas=["server-side-fallback-2026-07-01"],
+                                              extra_body={"fallbacks": "default"}, **base_kwargs)
+        else:
+            ctx = client.messages.stream(messages=messages, **base_kwargs)
+        with ctx as stream:
             for event in stream:
                 et = getattr(event, "type", None)
                 if et == "content_block_start":
