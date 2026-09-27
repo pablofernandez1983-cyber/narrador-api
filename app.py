@@ -458,12 +458,15 @@ def _norm(t):
     t = unicodedata.normalize("NFKD", t or "").encode("ascii", "ignore").decode().lower()
     return re.sub(r"[^a-z0-9]+", " ", t).strip()
 
-def _deezer_artist(name):
+def _deezer_artist(name, topic=""):
+    """El artista pedido; si el tema nombra a otro de los resultados con un nombre más completo
+    (ej. pidió "La Mariposa" y el tema habla de "El Plan de la Mariposa"), gana ese."""
     r = requests.get("https://api.deezer.com/search/artist", params={"q": name}, timeout=20).json()
-    for a in r.get("data", []):
-        if _norm(a["name"]) == _norm(name) and a.get("picture_xl"):
-            return a
-    return None
+    found = [a for a in r.get("data", []) if a.get("picture_xl")]
+    in_topic = [a for a in found if topic and f" {_norm(a['name'])} " in f" {topic} "]
+    if in_topic:
+        return max(in_topic, key=lambda a: len(a["name"]))
+    return next((a for a in found if _norm(a["name"]) == _norm(name)), None)
 
 def _mentioned(name, topic):
     """True si el nombre encontrado (artista, artículo) aparece en el tema del episodio: evita portadas de
@@ -477,7 +480,7 @@ def _find_real_image(plan, topic=""):
     """(url, descripción de la fuente) o (None, None). `topic` = título + tema normalizados."""
     src = plan.get("source")
     if src == "album" and plan.get("artist") and plan.get("album"):
-        a = _deezer_artist(plan["artist"])
+        a = _deezer_artist(plan["artist"], topic)
         if a and _mentioned(a["name"], topic):
             albums = requests.get(f"https://api.deezer.com/artist/{a['id']}/albums",
                                   params={"limit": 100}, timeout=20).json().get("data", [])
@@ -490,13 +493,13 @@ def _find_real_image(plan, topic=""):
                         return al["cover_xl"], f'Deezer: tapa de "{al["title"]}"'
         src = "artist"  # no apareció el disco: al menos la foto de la banda
     if src == "artist" and plan.get("artist"):
-        a = _deezer_artist(plan["artist"])
+        a = _deezer_artist(plan["artist"], topic)
         if a and _mentioned(a["name"], topic):
             return a["picture_xl"], f'Deezer: foto de {a["name"]}'
     if src == "wikipedia" and plan.get("wikipedia_title"):
         for lang in [plan.get("lang") or "es", "en"]:
             api = f"https://{lang}.wikipedia.org/w/api.php"
-            base = {"action": "query", "prop": "pageimages", "piprop": "original", "format": "json"}
+            base = {"action": "query", "prop": "pageimages", "piprop": "thumbnail", "pithumbsize": 800, "format": "json"}
             # 1) el artículo exacto que eligió Claude; 2) si no existe, el más parecido, pero sólo si
             #    su título aparece en el tema (la búsqueda "por parecido" trae cualquier cosa si no)
             exact = requests.get(api, headers=IMG_HEADERS, timeout=20,
@@ -505,8 +508,8 @@ def _find_real_image(plan, topic=""):
                 **base, "generator": "search", "gsrsearch": plan["wikipedia_title"], "gsrlimit": 1}).json()
             for r, validate in ((exact, False), (search, True)):
                 for pg in r.get("query", {}).get("pages", {}).values():
-                    url = pg.get("original", {}).get("source")
-                    if not url or url.lower().endswith(".svg"):
+                    url = pg.get("thumbnail", {}).get("source")
+                    if not url:
                         continue
                     if validate and not _mentioned(pg.get("title", ""), topic):
                         continue
