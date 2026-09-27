@@ -549,7 +549,7 @@ def _square_jpeg(raw):
     img.save(out, "JPEG", quality=85)
     return out.getvalue()
 
-def _make_cover(jid, allow_ai=True):
+def _make_cover(jid, allow_ai=True, force_ai=False):
     """Portada del episodio: imagen real si la hay; si no, ilustración con Gemini.
     Nunca rompe el job: si falla todo, el episodio usa la imagen por defecto."""
     job = _job_get(jid)
@@ -557,6 +557,8 @@ def _make_cover(jid, allow_ai=True):
         return None
     raw, source = None, None
     try:
+        if force_ai:
+            raise LookupError("se pidió ilustración")
         url = None
         topic = _norm(f'{job.get("title") or ""} {(job.get("prompt") or "")[:6000]}')
         for cand in _cover_plan(job):
@@ -567,6 +569,8 @@ def _make_cover(jid, allow_ai=True):
             r = requests.get(url, headers=IMG_HEADERS, timeout=30)
             r.raise_for_status()
             raw = r.content
+    except LookupError:
+        raw = None
     except Exception:
         traceback.print_exc()
         raw = None
@@ -749,8 +753,9 @@ def jobs_cover(jid):
         return err
     if not _job_get(jid):
         return jsonify({"error": "not found"}), 404
+    body = request.get_json(force=True, silent=True) or {}
     try:
-        _make_cover(jid)
+        _make_cover(jid, force_ai=bool(body.get("ai")))
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": f"no se pudo generar: {str(e)[:200]}"}), 502
