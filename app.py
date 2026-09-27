@@ -81,7 +81,8 @@ def _ensure_schema():
                   ADD COLUMN IF NOT EXISTS played_at   TIMESTAMPTZ,
                   ADD COLUMN IF NOT EXISTS deleted_at  TIMESTAMPTZ,
                   ADD COLUMN IF NOT EXISTS cover_key   TEXT,
-                  ADD COLUMN IF NOT EXISTS cover_source TEXT;
+                  ADD COLUMN IF NOT EXISTS cover_source TEXT,
+                  ADD COLUMN IF NOT EXISTS script      TEXT;
                 CREATE TABLE IF NOT EXISTS narrador_folders (
                   name       TEXT        PRIMARY KEY,
                   position   INT         NOT NULL DEFAULT 0,
@@ -129,7 +130,10 @@ def _job_list(limit=50):
     try:
         with c.cursor(cursor_factory=RDC) as cur:
             cur.execute("SELECT * FROM narrador_jobs WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT %s", (limit,))
-            return [_job_from_row(r) for r in cur.fetchall()]
+            rows = [_job_from_row(r) for r in cur.fetchall()]
+            for r in rows:
+                r.pop("script", None)
+            return rows
     finally:
         c.close()
 
@@ -218,6 +222,23 @@ def _split_text(text, max_bytes=3800):
         chunks.append(current.strip())
     return chunks
 
+MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
+         "septiembre", "octubre", "noviembre", "diciembre"]
+
+def _today_es():
+    """Ej. '27 de septiembre de 2026' (hora de Argentina)."""
+    from datetime import timedelta
+    d = datetime.now(timezone.utc) - timedelta(hours=3)
+    return f"{d.day} de {MESES[d.month - 1]} de {d.year}"
+
+def _date_context():
+    # Sin esto el modelo asume la fecha de su entrenamiento: "las próximas elecciones" terminaban
+    # siendo las de 2023 (pasó el 27-09-2026 con un podcast de elecciones).
+    return (f"\n\nFECHA DE HOY: {_today_es()}. Cuando el pedido dice 'próximo', 'actual', 'este año', "
+            "'último' o 'hoy', se refiere a esta fecha. Tus conocimientos pueden estar desactualizados: si tenés "
+            "búsqueda web, usala para confirmar la situación actual antes de afirmar hechos recientes, y no "
+            "presentes como futuro algo que ya pasó.")
+
 SYSTEM_PROMPT = (
     "Sos un guionista que escribe contenido para ser narrado en audio en español rioplatense. "
     "Respondé SIEMPRE con texto limpio listo para leer en voz alta: sin títulos, sin encabezados, "
@@ -258,7 +279,7 @@ def _generate_text(job):
     model = job["model"]
     haiku = model.startswith("claude-haiku")
     # Los modelos nuevos piensan antes de escribir y eso cuenta en max_tokens: más margen.
-    base_kwargs = dict(model=model, max_tokens=32000 if haiku else 64000, system=SYSTEM_PROMPT)
+    base_kwargs = dict(model=model, max_tokens=32000 if haiku else 64000, system=SYSTEM_PROMPT + _date_context())
     if job["web_search"]:
         # web_search_20260209 (filtrado dinámico) en Sonnet/Opus/Fable nuevos; Haiku usa la básica
         search_type = "web_search_20250305" if haiku else "web_search_20260209"
@@ -376,6 +397,8 @@ def _gemini_title(source):
             params={"key": GEMINI_API_KEY},
             json={
                 "contents": [{"parts": [{"text":
+                    f'Fecha de hoy: {_today_es()}. Si el contenido habla de algo "próximo" o "actual", '
+                    'el título tiene que corresponder a esta fecha (nunca inventes un año que no esté en el contenido). '
                     'Generá un título en español de hasta 10 palabras para este podcast. '
                     'El título debe ser MUY ESPECÍFICO: incluí los nombres propios, palabras '
                     'clave y términos exactos del tema. Nunca uses títulos genéricos. Solo el '
@@ -443,7 +466,7 @@ def _cover_plan(job):
         model="claude-haiku-4-5", max_tokens=300,
         messages=[{"role": "user", "content": COVER_PLAN_PROMPT
                    .replace("{title}", job.get("title") or "")
-                   .replace("{context}", (job.get("prompt") or "")[:2500])}],
+                   .replace("{context}", (job.get("script") or job.get("prompt") or "")[:2500])}],
     )
     txt = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
     m = re.search(r"\[.*\]", txt, re.S)
@@ -568,7 +591,7 @@ def _make_cover(jid, allow_ai=True, force_ai=False):
         if force_ai:
             raise LookupError("se pidió ilustración")
         url = None
-        topic = _norm(f'{job.get("title") or ""} {(job.get("prompt") or "")[:6000]}')
+        topic = _norm(f'{job.get("title") or ""} {(job.get("script") or job.get("prompt") or "")[:6000]}')
         for cand in _cover_plan(job):
             url, source = _find_real_image(cand, topic)
             if url:
@@ -629,8 +652,11 @@ def _process_job(jid):
             text_init = "🔎 Investigando en la web..." if job["web_search"] else "Pidiendo a Claude..."
             _job_update(jid, status=status_init, progress_pct=5, progress_text=text_init)
             text, searches = _generate_text(job)
-            title = gtitle or text.split("\n")[0][:120].strip() or job["prompt"][:80]
-            _job_update(jid, text_chars=len(text), title=title, search_count=searches)
+            # El título definitivo sale del guión escrito (lo que realmente dice), no del pedido
+            if not job.get("title"):
+                gtitle = _gemini_title(text[:1500]) or gtitle
+            title = job.get("title") or gtitle or text.split("\n")[0][:120].strip() or job["prompt"][:80]
+            _job_update(jid, text_chars=len(text), title=title, search_count=searches, script=text)
 
         audio_key, audio_size = _generate_audio(job, text)
         _job_update(jid, status="done", progress_pct=100,
