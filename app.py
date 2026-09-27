@@ -417,6 +417,28 @@ def _process_job(jid):
 def root():
     return jsonify({"ok": True, "service": "narrador-api"})
 
+PRIVACY_HTML = """<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Narrador — Política de privacidad</title>
+<style>body{font-family:system-ui,sans-serif;max-width:680px;margin:40px auto;padding:0 20px;line-height:1.6;color:#222}</style>
+</head><body>
+<h1>Narrador — Política de privacidad</h1>
+<p>Última actualización: 26 de septiembre de 2026.</p>
+<p>Narrador es una app de uso personal para escuchar podcasts generados por su propio autor.</p>
+<h2>Qué datos usa</h2>
+<ul>
+<li>La lista de episodios, sus carpetas y el progreso de escucha (posición y si ya se escuchó) se guardan en el servidor propio de la app para poder retomarlos desde cualquier dispositivo.</li>
+<li>Los archivos de audio se descargan al teléfono para escucharlos sin conexión.</li>
+</ul>
+<h2>Qué datos NO usa</h2>
+<p>La app no pide cuentas ni datos personales, no usa ubicación, contactos, micrófono ni cámara, no muestra publicidad y no comparte información con terceros.</p>
+<h2>Contacto</h2>
+<p>pablofernandez1983@gmail.com</p>
+</body></html>"""
+
+@app.route("/privacy")
+def privacy():
+    return Response(PRIVACY_HTML, mimetype="text/html")
+
 @app.route("/health")
 def health():
     return jsonify({"ok": True})
