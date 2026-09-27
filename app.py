@@ -412,18 +412,22 @@ COVER_MODEL = "gemini-2.5-flash-image"
 IMG_HEADERS = {"User-Agent": "NarradorPodcasts/1.0 (pablofernandez1983@gmail.com)"}
 
 COVER_PLAN_PROMPT = """Vas a elegir la imagen de portada de un episodio de podcast. Tiene que ser una imagen REAL
-del tema principal, no una ilustración. Respondé SOLO un JSON (sin texto antes ni después) con esta forma:
-{"source": "album" | "artist" | "wikipedia" | "none",
- "artist": "banda o artista (si source es album o artist)",
- "album": "título exacto del disco (si source es album)",
- "wikipedia_title": "título exacto del artículo de Wikipedia (si source es wikipedia)",
- "lang": "es" | "en"}
+del tema principal, no una ilustración. Respondé SOLO un JSON (sin texto antes ni después): una lista de
+1 a 3 opciones en orden de preferencia (si la primera no tiene imagen se prueba la siguiente), cada una así:
+[{"source": "album" | "artist" | "wikipedia",
+  "artist": "banda o artista (si source es album o artist)",
+  "album": "título exacto del disco (si source es album)",
+  "wikipedia_title": "título exacto del artículo de Wikipedia (si source es wikipedia)",
+  "lang": "es" | "en"}]
+Si no hay ninguna imagen real posible, respondé [].
 Criterios:
 - Si el episodio trata de un disco puntual (o de las letras de ciertos discos), "album" con el disco más representativo.
 - Si trata de una banda o músico en general (historia, curiosidades), "artist".
 - Si trata de una persona, lugar, empresa, obra o hecho histórico con artículo en Wikipedia, "wikipedia" con el
   título del artículo (en el idioma de "lang"; preferí "es" si existe).
-- Si el tema es abstracto o no hay una imagen real clara, "none".
+- Agregá alternativas razonables: por ejemplo, para una banda, también su artículo de Wikipedia; para una
+  persona poco conocida, el artículo del hecho o lugar principal; para un tema general, el artículo más cercano.
+- Si el tema es abstracto (consejos, capacitación interna, ideas sueltas), respondé [].
 
 Título: {title}
 
@@ -442,8 +446,12 @@ def _cover_plan(job):
                    .replace("{context}", (job.get("prompt") or "")[:2500])}],
     )
     txt = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
-    m = re.search(r"\{.*\}", txt, re.S)
-    return _json.loads(m.group(0)) if m else {"source": "none"}
+    m = re.search(r"\[.*\]", txt, re.S)
+    try:
+        plan = _json.loads(m.group(0)) if m else []
+    except ValueError:
+        plan = []
+    return [c for c in plan if isinstance(c, dict)]
 
 def _norm(t):
     import unicodedata
@@ -480,8 +488,8 @@ def _find_real_image(plan):
     if src == "wikipedia" and plan.get("wikipedia_title"):
         for lang in [plan.get("lang") or "es", "en"]:
             r = requests.get(f"https://{lang}.wikipedia.org/w/api.php", headers=IMG_HEADERS, timeout=20, params={
-                "action": "query", "titles": plan["wikipedia_title"], "prop": "pageimages",
-                "piprop": "original", "format": "json", "redirects": 1}).json()
+                "action": "query", "generator": "search", "gsrsearch": plan["wikipedia_title"], "gsrlimit": 1,
+                "prop": "pageimages", "piprop": "original", "format": "json"}).json()
             for pg in r.get("query", {}).get("pages", {}).values():
                 url = pg.get("original", {}).get("source")
                 if url and not url.lower().endswith(".svg"):
@@ -529,7 +537,11 @@ def _make_cover(jid, allow_ai=True):
         return None
     raw, source = None, None
     try:
-        url, source = _find_real_image(_cover_plan(job))
+        url = None
+        for cand in _cover_plan(job):
+            url, source = _find_real_image(cand)
+            if url:
+                break
         if url:
             r = requests.get(url, headers=IMG_HEADERS, timeout=30)
             r.raise_for_status()
