@@ -80,7 +80,8 @@ def _ensure_schema():
                   ADD COLUMN IF NOT EXISTS listened    BOOLEAN NOT NULL DEFAULT false,
                   ADD COLUMN IF NOT EXISTS played_at   TIMESTAMPTZ,
                   ADD COLUMN IF NOT EXISTS deleted_at  TIMESTAMPTZ,
-                  ADD COLUMN IF NOT EXISTS cover_key   TEXT;
+                  ADD COLUMN IF NOT EXISTS cover_key   TEXT,
+                  ADD COLUMN IF NOT EXISTS cover_source TEXT;
                 CREATE TABLE IF NOT EXISTS narrador_folders (
                   name       TEXT        PRIMARY KEY,
                   position   INT         NOT NULL DEFAULT 0,
@@ -403,15 +404,91 @@ def _gemini_title(source):
         print("gemini_title error", repr(e))
         return None
 
-# ─── Portadas (Gemini imagen) ─────────────────────────────────────
+# ─── Portadas ─────────────────────────────────────────────────────
+# Primero se busca una imagen REAL del tema (foto de la banda o tapa del disco en Deezer, foto del
+# artículo de Wikipedia de la persona/lugar/empresa). Sólo si no hay nada real se genera una
+# ilustración con Gemini. Qué buscar lo decide Claude Haiku leyendo el título y el comienzo del tema.
 COVER_MODEL = "gemini-2.5-flash-image"
+IMG_HEADERS = {"User-Agent": "NarradorPodcasts/1.0 (pablofernandez1983@gmail.com)"}
 
-def _make_cover(jid):
-    """Genera la portada del episodio (ilustración cuadrada sin texto) y la guarda en S3.
-    Nunca rompe el job: si falla, el episodio usa la imagen por defecto."""
-    job = _job_get(jid)
-    if not job or not GEMINI_API_KEY:
-        return None
+COVER_PLAN_PROMPT = """Vas a elegir la imagen de portada de un episodio de podcast. Tiene que ser una imagen REAL
+del tema principal, no una ilustración. Respondé SOLO un JSON (sin texto antes ni después) con esta forma:
+{"source": "album" | "artist" | "wikipedia" | "none",
+ "artist": "banda o artista (si source es album o artist)",
+ "album": "título exacto del disco (si source es album)",
+ "wikipedia_title": "título exacto del artículo de Wikipedia (si source es wikipedia)",
+ "lang": "es" | "en"}
+Criterios:
+- Si el episodio trata de un disco puntual (o de las letras de ciertos discos), "album" con el disco más representativo.
+- Si trata de una banda o músico en general (historia, curiosidades), "artist".
+- Si trata de una persona, lugar, empresa, obra o hecho histórico con artículo en Wikipedia, "wikipedia" con el
+  título del artículo (en el idioma de "lang"; preferí "es" si existe).
+- Si el tema es abstracto o no hay una imagen real clara, "none".
+
+Título: {title}
+
+Comienzo del tema:
+{context}"""
+
+def _cover_plan(job):
+    """Le pide a Claude Haiku qué imagen real buscar. Devuelve dict (o {"source": "none"})."""
+    import json as _json
+    from anthropic import Anthropic
+    client = Anthropic(api_key=ANTHROPIC_API_KEY)
+    msg = client.messages.create(
+        model="claude-haiku-4-5", max_tokens=300,
+        messages=[{"role": "user", "content": COVER_PLAN_PROMPT
+                   .replace("{title}", job.get("title") or "")
+                   .replace("{context}", (job.get("prompt") or "")[:2500])}],
+    )
+    txt = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+    m = re.search(r"\{.*\}", txt, re.S)
+    return _json.loads(m.group(0)) if m else {"source": "none"}
+
+def _norm(t):
+    import unicodedata
+    t = unicodedata.normalize("NFKD", t or "").encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", " ", t).strip()
+
+def _deezer_artist(name):
+    r = requests.get("https://api.deezer.com/search/artist", params={"q": name}, timeout=20).json()
+    for a in r.get("data", []):
+        if _norm(a["name"]) == _norm(name) and a.get("picture_xl"):
+            return a
+    return None
+
+def _find_real_image(plan):
+    """(url, descripción de la fuente) o (None, None)."""
+    src = plan.get("source")
+    if src == "album" and plan.get("artist") and plan.get("album"):
+        a = _deezer_artist(plan["artist"])
+        if a:
+            albums = requests.get(f"https://api.deezer.com/artist/{a['id']}/albums",
+                                  params={"limit": 100}, timeout=20).json().get("data", [])
+            want = _norm(plan["album"])
+            # Primero el disco exacto de estudio; si no, el que contenga el nombre
+            for exact in (True, False):
+                for al in albums:
+                    t = _norm(al["title"])
+                    if (t == want if exact else want in t) and al.get("cover_xl"):
+                        return al["cover_xl"], f'Deezer: tapa de "{al["title"]}"'
+        src = "artist"  # no apareció el disco: al menos la foto de la banda
+    if src == "artist" and plan.get("artist"):
+        a = _deezer_artist(plan["artist"])
+        if a:
+            return a["picture_xl"], f'Deezer: foto de {a["name"]}'
+    if src == "wikipedia" and plan.get("wikipedia_title"):
+        for lang in [plan.get("lang") or "es", "en"]:
+            r = requests.get(f"https://{lang}.wikipedia.org/w/api.php", headers=IMG_HEADERS, timeout=20, params={
+                "action": "query", "titles": plan["wikipedia_title"], "prop": "pageimages",
+                "piprop": "original", "format": "json", "redirects": 1}).json()
+            for pg in r.get("query", {}).get("pages", {}).values():
+                url = pg.get("original", {}).get("source")
+                if url and not url.lower().endswith(".svg"):
+                    return url, f'Wikipedia ({lang}): {pg.get("title")}'
+    return None, None
+
+def _gemini_illustration(job):
     context = (job.get("prompt") or "")[:600]
     prompt = (
         f'Ilustración cuadrada para la portada de un episodio de podcast titulado "{job.get("title") or ""}". '
@@ -428,16 +505,52 @@ def _make_cover(jid):
     )
     r.raise_for_status()
     parts = r.json()["candidates"][0]["content"]["parts"]
-    raw = next(base64.b64decode(p["inlineData"]["data"]) for p in parts if "inlineData" in p)
-    # 512x512 JPEG: liviano para la app y Android Auto (el PNG original pesa ~2 MB)
+    return next(base64.b64decode(p["inlineData"]["data"]) for p in parts if "inlineData" in p)
+
+def _square_jpeg(raw):
+    """Recorte cuadrado centrado (un poco hacia arriba, donde suelen estar las caras) a 512x512 JPEG."""
     from io import BytesIO
     from PIL import Image
-    img = Image.open(BytesIO(raw)).convert("RGB").resize((512, 512), Image.LANCZOS)
+    img = Image.open(BytesIO(raw)).convert("RGB")
+    w, h = img.size
+    side = min(w, h)
+    left = (w - side) // 2
+    top = max(0, min(h - side, int((h - side) * 0.3)))
+    img = img.crop((left, top, left + side, top + side)).resize((512, 512), Image.LANCZOS)
     out = BytesIO()
     img.save(out, "JPEG", quality=85)
-    key = f"{S3_PREFIX}covers/{jid}.jpg"
-    _s3_put(key, out.getvalue(), "image/jpeg")
-    _job_update(jid, cover_key=key)
+    return out.getvalue()
+
+def _make_cover(jid, allow_ai=True):
+    """Portada del episodio: imagen real si la hay; si no, ilustración con Gemini.
+    Nunca rompe el job: si falla todo, el episodio usa la imagen por defecto."""
+    job = _job_get(jid)
+    if not job:
+        return None
+    raw, source = None, None
+    try:
+        url, source = _find_real_image(_cover_plan(job))
+        if url:
+            r = requests.get(url, headers=IMG_HEADERS, timeout=30)
+            r.raise_for_status()
+            raw = r.content
+    except Exception:
+        traceback.print_exc()
+        raw = None
+    if raw is None:
+        if not (allow_ai and GEMINI_API_KEY):
+            return None
+        raw, source = _gemini_illustration(job), "Ilustración generada con IA"
+    # La key cambia en cada versión para que la app no muestre la portada vieja cacheada
+    key = f"{S3_PREFIX}covers/{jid}-{int(datetime.now(timezone.utc).timestamp())}.jpg"
+    _s3_put(key, _square_jpeg(raw), "image/jpeg")
+    old = job.get("cover_key")
+    _job_update(jid, cover_key=key, cover_source=source)
+    if old and old != key:
+        try:
+            _s3_delete(old)
+        except Exception:
+            pass
     return key
 
 def _make_cover_async(jid):
