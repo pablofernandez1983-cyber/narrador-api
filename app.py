@@ -79,7 +79,8 @@ def _ensure_schema():
                   ADD COLUMN IF NOT EXISTS duration_ms BIGINT,
                   ADD COLUMN IF NOT EXISTS listened    BOOLEAN NOT NULL DEFAULT false,
                   ADD COLUMN IF NOT EXISTS played_at   TIMESTAMPTZ,
-                  ADD COLUMN IF NOT EXISTS deleted_at  TIMESTAMPTZ;
+                  ADD COLUMN IF NOT EXISTS deleted_at  TIMESTAMPTZ,
+                  ADD COLUMN IF NOT EXISTS cover_key   TEXT;
                 CREATE TABLE IF NOT EXISTS narrador_folders (
                   name       TEXT        PRIMARY KEY,
                   position   INT         NOT NULL DEFAULT 0,
@@ -162,8 +163,8 @@ def _s3():
         region_name=S3_REGION, config=Config(signature_version="s3v4"),
     )
 
-def _s3_put(key, body):
-    _s3().put_object(Bucket=S3_BUCKET, Key=key, Body=body, ContentType="audio/mpeg")
+def _s3_put(key, body, content_type="audio/mpeg"):
+    _s3().put_object(Bucket=S3_BUCKET, Key=key, Body=body, ContentType=content_type)
 
 def _s3_get(key):
     return _s3().get_object(Bucket=S3_BUCKET, Key=key)["Body"].read()
@@ -402,6 +403,51 @@ def _gemini_title(source):
         print("gemini_title error", repr(e))
         return None
 
+# ─── Portadas (Gemini imagen) ─────────────────────────────────────
+COVER_MODEL = "gemini-2.5-flash-image"
+
+def _make_cover(jid):
+    """Genera la portada del episodio (ilustración cuadrada sin texto) y la guarda en S3.
+    Nunca rompe el job: si falla, el episodio usa la imagen por defecto."""
+    job = _job_get(jid)
+    if not job or not GEMINI_API_KEY:
+        return None
+    context = (job.get("prompt") or "")[:600]
+    prompt = (
+        f'Ilustración cuadrada para la portada de un episodio de podcast titulado "{job.get("title") or ""}". '
+        f"Tema del episodio: {context}\n\n"
+        "Estilo: ilustración editorial moderna, colores cálidos, composición simple y reconocible en tamaño chico. "
+        "Sin texto, sin letras, sin números, sin logos."
+    )
+    r = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{COVER_MODEL}:generateContent",
+        params={"key": GEMINI_API_KEY},
+        json={"contents": [{"parts": [{"text": prompt}]}],
+              "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": {"aspectRatio": "1:1"}}},
+        timeout=120,
+    )
+    r.raise_for_status()
+    parts = r.json()["candidates"][0]["content"]["parts"]
+    raw = next(base64.b64decode(p["inlineData"]["data"]) for p in parts if "inlineData" in p)
+    # 512x512 JPEG: liviano para la app y Android Auto (el PNG original pesa ~2 MB)
+    from io import BytesIO
+    from PIL import Image
+    img = Image.open(BytesIO(raw)).convert("RGB").resize((512, 512), Image.LANCZOS)
+    out = BytesIO()
+    img.save(out, "JPEG", quality=85)
+    key = f"{S3_PREFIX}covers/{jid}.jpg"
+    _s3_put(key, out.getvalue(), "image/jpeg")
+    _job_update(jid, cover_key=key)
+    return key
+
+def _make_cover_async(jid):
+    def run():
+        try:
+            _make_cover(jid)
+        except Exception:
+            traceback.print_exc()
+    threading.Thread(target=run, daemon=True).start()
+
 def _process_job(jid):
     try:
         job = _job_get(jid)
@@ -431,6 +477,7 @@ def _process_job(jid):
         audio_key, audio_size = _generate_audio(job, text)
         _job_update(jid, status="done", progress_pct=100,
                     progress_text="Listo", audio_key=audio_key, audio_size=audio_size)
+        _make_cover_async(jid)
 
     except Exception as e:
         traceback.print_exc()
@@ -538,6 +585,30 @@ def jobs_audio(jid):
         return Response(audio, status=206, mimetype="audio/mpeg", headers=headers)
     audio = _s3_get(job["audio_key"])
     return Response(audio, mimetype="audio/mpeg", headers=headers)
+
+@app.route("/covers/<jid>.jpg", methods=["GET"])
+def cover_get(jid):
+    """Portada del episodio. Sin clave a propósito: la pide Android Auto / el cargador de imágenes
+    y el id es un UUID imposible de adivinar; no expone nada más que la ilustración."""
+    job = _job_get(jid)
+    if not job or not job.get("cover_key") or job.get("deleted_at"):
+        return jsonify({"error": "sin portada"}), 404
+    data = _s3().get_object(Bucket=S3_BUCKET, Key=job["cover_key"])["Body"].read()
+    return Response(data, mimetype="image/jpeg", headers={"Cache-Control": "public, max-age=604800"})
+
+@app.route("/jobs/<jid>/cover", methods=["POST"])
+def jobs_cover(jid):
+    """(Re)genera la portada de un episodio existente."""
+    if (err := _check_auth()):
+        return err
+    if not _job_get(jid):
+        return jsonify({"error": "not found"}), 404
+    try:
+        _make_cover(jid)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": f"no se pudo generar: {str(e)[:200]}"}), 502
+    return jsonify(_job_get(jid))
 
 # ─── Biblioteca: progreso y carpetas (app Android) ────────────────
 JOB_PATCHABLE = {"folder", "position_ms", "duration_ms", "listened", "title"}
