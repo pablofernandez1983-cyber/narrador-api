@@ -536,15 +536,23 @@ def _gemini_illustration(job):
     return next(base64.b64decode(p["inlineData"]["data"]) for p in parts if "inlineData" in p)
 
 def _square_jpeg(raw):
-    """Recorte cuadrado centrado (un poco hacia arriba, donde suelen estar las caras) a 512x512 JPEG."""
+    """512x512 JPEG. Fotos: recorte cuadrado centrado (un poco hacia arriba, donde suelen estar las
+    caras). Imágenes muy apaisadas o muy altas (logos, banderas, mapas): se ven enteras, con fondo."""
     from io import BytesIO
-    from PIL import Image
-    img = Image.open(BytesIO(raw)).convert("RGB")
+    from PIL import Image, ImageOps, ImageFilter
+    img = ImageOps.exif_transpose(Image.open(BytesIO(raw))).convert("RGB")   # respeta la rotación de la foto
     w, h = img.size
-    side = min(w, h)
-    left = (w - side) // 2
-    top = max(0, min(h - side, int((h - side) * 0.3)))
-    img = img.crop((left, top, left + side, top + side)).resize((512, 512), Image.LANCZOS)
+    if max(w, h) / min(w, h) > 1.45:
+        # Fondo: la misma imagen ampliada y muy desenfocada, y encima la imagen completa
+        bg = img.resize((512, 512), Image.LANCZOS).filter(ImageFilter.GaussianBlur(28))
+        img.thumbnail((480, 480), Image.LANCZOS)
+        bg.paste(img, ((512 - img.width) // 2, (512 - img.height) // 2))
+        img = bg
+    else:
+        side = min(w, h)
+        left = (w - side) // 2
+        top = max(0, min(h - side, int((h - side) * 0.3)))
+        img = img.crop((left, top, left + side, top + side)).resize((512, 512), Image.LANCZOS)
     out = BytesIO()
     img.save(out, "JPEG", quality=85)
     return out.getvalue()
