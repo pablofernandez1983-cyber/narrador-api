@@ -281,9 +281,10 @@ def _generate_text(job):
     # Los modelos nuevos piensan antes de escribir y eso cuenta en max_tokens: más margen.
     base_kwargs = dict(model=model, max_tokens=32000 if haiku else 64000, system=SYSTEM_PROMPT + _date_context())
     if job["web_search"]:
-        # web_search_20260209 (filtrado dinámico) en Sonnet/Opus/Fable nuevos; Haiku usa la básica
-        search_type = "web_search_20250305" if haiku else "web_search_20260209"
-        base_kwargs["tools"] = [{"type": search_type, "name": "web_search", "max_uses": 6}]
+        # Búsqueda web BÁSICA en todos los modelos. La web_search_20260209 trae una "computadora"
+        # interna (code execution) y Sonnet 5 la usó para redactar y corregir borradores con Python:
+        # sus comentarios de trabajo ("Bien, los tags están balanceados…") terminaban narrados (27-09-2026).
+        base_kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 6}]
     # Fable y Opus 5.x: si un clasificador de seguridad rechaza el pedido, el servidor reintenta
     # solo con otro modelo (server-side fallback) en vez de devolver un guión vacío.
     use_fallback = model.startswith(("claude-fable", "claude-opus-5"))
@@ -306,6 +307,9 @@ def _generate_text(job):
                 et = getattr(event, "type", None)
                 if et == "content_block_start":
                     block = getattr(event, "content_block", None)
+                    if block and getattr(block, "type", None) == "server_tool_use":
+                        # Texto previo a cualquier herramienta = "pensar en voz alta", no guión
+                        full_text = full_text[:turn_start]
                     if block and getattr(block, "type", None) == "server_tool_use" \
                             and getattr(block, "name", None) == "web_search":
                         # Lo que escribió antes de buscar es "pensar en voz alta" ("Necesito más
