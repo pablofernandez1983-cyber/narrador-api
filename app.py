@@ -104,10 +104,10 @@ def _job_create(data):
         with c.cursor() as cur:
             cur.execute("""
                 INSERT INTO narrador_jobs
-                  (id, prompt, model, voice, speed, web_search, status, progress_pct, search_count, folder)
-                VALUES (%s, %s, %s, %s, %s, %s, 'pending', 0, 0, %s)
+                  (id, prompt, model, voice, speed, web_search, status, progress_pct, search_count, folder, title)
+                VALUES (%s, %s, %s, %s, %s, %s, 'pending', 0, 0, %s, %s)
             """, (jid, data["prompt"], data["model"], data["voice"],
-                  data["speed"], data["web_search"], data.get("folder")))
+                  data["speed"], data["web_search"], data.get("folder"), data.get("title")))
         c.commit()
     finally:
         c.close()
@@ -397,8 +397,9 @@ def _process_job(jid):
 
         # Título con Gemini apenas arranca (aparece rápido vía polling).
         # Si falla, se usa el fallback de primera línea más abajo.
-        gtitle = _gemini_title(job["prompt"])
-        if gtitle:
+        # Si el pedido ya trae título (ej. episodios de una serie compartidos desde la app), se respeta.
+        gtitle = job.get("title") or _gemini_title(job["prompt"])
+        if gtitle and not job.get("title"):
             _job_update(jid, title=gtitle)
 
         if job["model"] == "direct":
@@ -481,6 +482,7 @@ def jobs_create():
             "web_search": bool(body.get("web_search")),
         }
     data["folder"] = (body.get("folder") or "").strip() or None
+    data["title"] = (body.get("title") or "").strip()[:200] or None
     if data["folder"]:
         _folder_ensure(data["folder"])
 
