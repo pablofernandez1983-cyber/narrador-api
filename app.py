@@ -29,12 +29,21 @@ app = Flask(__name__)
 CORS(app)
 
 # ─── Auth ─────────────────────────────────────────────────────────
+# Clave de solo lectura para los revisores de Google Play (la app Android pide clave al abrir).
+# Con ésta se puede navegar y escuchar, pero no crear, modificar ni borrar nada.
+NARRADOR_READONLY_KEY = os.environ.get("NARRADOR_READONLY_KEY", "")
+
 def _check_auth():
     if not NARRADOR_API_KEY:
         return None
-    if request.headers.get("X-API-Key", "") != NARRADOR_API_KEY:
-        return jsonify({"error": "unauthorized"}), 401
-    return None
+    key = request.headers.get("X-API-Key", "")
+    if key == NARRADOR_API_KEY:
+        return None
+    if NARRADOR_READONLY_KEY and key == NARRADOR_READONLY_KEY:
+        if request.method in ("GET", "HEAD", "OPTIONS"):
+            return None
+        return jsonify({"error": "clave de solo lectura"}), 403
+    return jsonify({"error": "unauthorized"}), 401
 
 # ─── DB helpers ───────────────────────────────────────────────────
 def _conn():
