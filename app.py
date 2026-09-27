@@ -69,7 +69,8 @@ def _ensure_schema():
                   ADD COLUMN IF NOT EXISTS position_ms BIGINT  NOT NULL DEFAULT 0,
                   ADD COLUMN IF NOT EXISTS duration_ms BIGINT,
                   ADD COLUMN IF NOT EXISTS listened    BOOLEAN NOT NULL DEFAULT false,
-                  ADD COLUMN IF NOT EXISTS played_at   TIMESTAMPTZ;
+                  ADD COLUMN IF NOT EXISTS played_at   TIMESTAMPTZ,
+                  ADD COLUMN IF NOT EXISTS deleted_at  TIMESTAMPTZ;
                 CREATE TABLE IF NOT EXISTS narrador_folders (
                   name       TEXT        PRIMARY KEY,
                   position   INT         NOT NULL DEFAULT 0,
@@ -116,7 +117,7 @@ def _job_list(limit=50):
     c, RDC = _conn()
     try:
         with c.cursor(cursor_factory=RDC) as cur:
-            cur.execute("SELECT * FROM narrador_jobs ORDER BY created_at DESC LIMIT %s", (limit,))
+            cur.execute("SELECT * FROM narrador_jobs WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT %s", (limit,))
             return [_job_from_row(r) for r in cur.fetchall()]
     finally:
         c.close()
@@ -635,12 +636,10 @@ def jobs_delete(jid):
     job = _job_get(jid)
     if not job:
         return jsonify({"error": "not found"}), 404
-    if job.get("audio_key"):
-        try:
-            _s3_delete(job["audio_key"])
-        except Exception:
-            pass
-    _job_delete(jid)
+    # Borrado lógico: el 27-sep-2026 el robot de pruebas de Google Play borró 16 episodios
+    # desde la app Android y no había forma de recuperarlos. Ahora sólo se ocultan
+    # (audio y fila quedan); se restauran con UPDATE narrador_jobs SET deleted_at = NULL.
+    _job_update(jid, deleted_at=datetime.now(timezone.utc))
     return jsonify({"ok": True})
 
 if __name__ == "__main__":
