@@ -295,6 +295,7 @@ def _generate_text(job):
     def stream_turn():
         nonlocal full_text, search_count
         last_update = 0
+        turn_start = len(full_text)
         if use_fallback:
             ctx = client.beta.messages.stream(messages=messages, betas=["server-side-fallback-2026-07-01"],
                                               extra_body={"fallbacks": "default"}, **base_kwargs)
@@ -307,6 +308,9 @@ def _generate_text(job):
                     block = getattr(event, "content_block", None)
                     if block and getattr(block, "type", None) == "server_tool_use" \
                             and getattr(block, "name", None) == "web_search":
+                        # Lo que escribió antes de buscar es "pensar en voz alta" ("Necesito más
+                        # información sobre…"), no guión: se descarta para que no se narre.
+                        full_text = full_text[:turn_start]
                         search_count += 1
                         _job_update(job["id"],
                                     progress_text=f"🔎 Buscando en la web ({search_count})...",
